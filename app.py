@@ -2,12 +2,23 @@ from flask import Flask, render_template_string, send_file, make_response, reque
 import os
 import json
 import uuid
+import re
 from datetime import datetime
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 80 * 1024 * 1024
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
+
+# --- ВСТРОЕННЫЕ ПЕСНИ (лежат в корне, как ты их и загрузил) ---
+BUILT_IN_SONGS = [
+    {"file": "song1.mp3", "title": "Космос", "artist": "Три Дня Дождя & Лапи"},
+    {"file": "song2.mp3", "title": "Выдыхай", "artist": "Три Дня Дождя feat. Zivert"},
+    {"file": "song3.mp3", "title": "Выше", "artist": "Авдейка"}
+]
 
 TEXTS = [
     "Желаю тебе: счастья, здоровья, успеха и достичь многих высот в жизни 🥳",
@@ -48,8 +59,6 @@ HTML_CODE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>С Днем Рождения, Соня!</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;700&family=Playfair+Display:ital,wght@0,400;1,400&display=swap" rel="stylesheet">
     <style>
         body, html {
@@ -103,8 +112,9 @@ HTML_CODE = """
         #gallery-screen[data-anim="fade"] .slide.prev { opacity: 0; z-index: 1; }
 
         .playlist-wrapper { display: flex; flex-direction: column; width: 100%; max-width: 400px; pointer-events: auto; height: 60vh; }
-        .upload-btn-wrapper { display: none; }
-        #upload-status { display: none; }
+        .upload-btn-wrapper { display: flex; align-items: center; justify-content: center; padding: 15px; background: linear-gradient(135deg, #ff007f, #ff0033); border-radius: 15px; color: white; font-weight: bold; cursor: pointer; box-shadow: 0 5px 15px rgba(255, 0, 127, 0.5); margin-bottom: 15px; font-size: 1rem; text-align: center; }
+        .upload-btn-wrapper input[type="file"] { display: none; }
+        #upload-status { color: #fff; font-size: 0.85rem; text-align: center; min-height: 1.1em; margin-bottom: 6px; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
         .playlist-container { display: flex; flex-direction: column; gap: 15px; width: 100%; overflow-y: auto; padding-right: 5px; flex-grow: 1; touch-action: pan-y; }
         .song-card { display: flex; flex-direction: column; gap: 15px; background: rgba(255, 255, 255, 0.1); border-radius: 15px; padding: 15px; border: 1px solid rgba(255, 255, 255, 0.2); box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
         .song-header { display: flex; align-items: center; justify-content: space-between; }
@@ -245,19 +255,55 @@ HTML_CODE = """
     <audio id="bg-audio" preload="none"></audio>
 
     <script>
-        const songs = [
-            { title: "Космос", artist: "Три Дня Дождя & Лапи", url: "/song1.mp3" },
-            { title: "Выдыхай", artist: "Три Дня Дождя feat. Zivert", url: "/song2.mp3" },
-            { title: "Выше", artist: "Авдейка", url: "/song3.mp3" }
-        ];
-
         const texts = {{ texts | safe }};
         const backgrounds = {{ backgrounds | safe }};
+        let songs = [];
         
         let currentAnimType = 'slide';
         let isSeeking = false;
 
         localStorage.removeItem('envelopeFinished');
+
+        async function loadSongs() {
+            try {
+                const res = await fetch('/api/songs');
+                songs = await res.json();
+                renderSongs();
+            } catch (e) { console.error("Ошибка загрузки списка песен", e); }
+        }
+
+        window.handleFileUpload = async function(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const status = document.getElementById('upload-status');
+            status.innerText = '⏳ Загружаю "' + file.name + '"...';
+            status.style.color = '#fff';
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const res = await fetch('/upload_song', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                
+                if (res.ok) {
+                    status.innerText = '✅ Песня успешно загружена!';
+                    status.style.color = '#00ff87';
+                    event.target.value = ''; 
+                    await loadSongs(); 
+                    setTimeout(() => { status.innerText = ''; }, 3000);
+                } else {
+                    throw new Error(data.error || 'Ошибка сервера');
+                }
+            } catch (e) {
+                status.innerText = '❌ Ошибка: ' + e.message;
+                status.style.color = '#ff4e50';
+            }
+        }
 
         const audio = document.getElementById('bg-audio');
         
@@ -516,6 +562,8 @@ HTML_CODE = """
                 } else if (i === 7) {
                     div.innerHTML = `
                         <div class="playlist-wrapper">
+                            <label class="upload-btn-wrapper">📁 Добавить песню с телефона<input type="file" accept="audio/*" onchange="handleFileUpload(event)"></label>
+                            <div id="upload-status"></div>
                             <div class="playlist-container" id="playlist-container"></div>
                             <div class="anim-controls">
                                 <button class="anim-btn active" id="btn-slide" onclick="setAnim('slide')">↔ Слайд</button>
@@ -526,7 +574,7 @@ HTML_CODE = """
                         </div>
                         <p style="margin-top: 15px;">${texts[i]}</p>
                     `;
-                    renderSongs();
+                    loadSongs(); 
                 } else if (i === 8) {
                     div.innerHTML = `
                         <div class="timer-box" onclick="handleTimerClick()">
@@ -638,7 +686,89 @@ def index():
         print(f"ОШИБКА В INDEX: {e}")
         return f"<h1>Ошибка сервера:</h1><p>{e}</p>"
 
-# --- РОУТЫ ДЛЯ КАРТИНОК И ПЕСЕН ИЗ КОРНЯ ---
+# --- API ДЛЯ ПЕСЕН ---
+def load_songs_data():
+    filepath = os.path.join(BASE_DIR, 'songs.json')
+    if not os.path.exists(filepath): return []
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f: return json.load(f)
+    except: return []
+
+def save_songs_data(data):
+    filepath = os.path.join(BASE_DIR, 'songs.json')
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+@app.route('/api/songs')
+def api_songs():
+    result = []
+    # 1. Встроенные
+    for i, s in enumerate(BUILT_IN_SONGS):
+        result.append({
+            'title': s['title'], 'artist': s['artist'], 
+            'url': f'/builtin/{i}'
+        })
+    # 2. Загруженные
+    uploaded = load_songs_data()
+    for s in uploaded:
+        result.append({
+            'title': s['title'], 'artist': s['artist'], 
+            'url': f'/uploads/{s["filename"]}'
+        })
+    return jsonify(result)
+
+@app.route('/upload_song', methods=['POST'])
+def upload_song():
+    if 'file' not in request.files:
+        return jsonify({'error': 'Файл не передан'}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'Файл не выбран'}), 400
+        
+    if file:
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in ['.mp3', '.wav', '.m4a', '.ogg']:
+            return jsonify({'error': 'Только MP3, WAV, M4A, OGG'}), 400
+            
+        unique_filename = f"{uuid.uuid4().hex}{ext}"
+        filepath = os.path.join(UPLOAD_FOLDER, unique_filename)
+        file.save(filepath)
+        
+        filename_no_ext = os.path.splitext(file.filename)[0]
+        title = filename_no_ext
+        artist = "Неизвестен"
+        
+        if ' - ' in filename_no_ext:
+            parts = filename_no_ext.split(' - ', 1)
+            artist = parts[0].strip()
+            title = parts[1].strip()
+            
+        uploaded = load_songs_data()
+        uploaded.append({
+            'filename': unique_filename,
+            'title': title,
+            'artist': artist
+        })
+        save_songs_data(uploaded)
+        
+        return jsonify({'status': 'success'}), 200
+
+# --- РОУТЫ ДЛЯ ФАЙЛОВ ---
+@app.route('/builtin/<int:idx>')
+def serve_builtin(idx):
+    if 0 <= idx < len(BUILT_IN_SONGS):
+        filepath = os.path.join(BASE_DIR, BUILT_IN_SONGS[idx]['file'])
+        if os.path.exists(filepath):
+            return send_file(filepath, mimetype='audio/mpeg')
+    return "Не найдено", 404
+
+@app.route('/uploads/<filename>')
+def serve_uploaded(filename):
+    filepath = os.path.join(UPLOAD_FOLDER, filename)
+    if os.path.exists(filepath):
+        return send_file(filepath, mimetype='audio/mpeg')
+    return "Не найдено", 404
+
 @app.route('/<int:num>.jpg')
 def serve_image(num):
     filepath = os.path.join(BASE_DIR, f"{num}.jpg")
@@ -648,20 +778,8 @@ def serve_image(num):
     response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
     return response
 
-@app.route('/song1.mp3')
-def serve_song1():
-    filepath = os.path.join(BASE_DIR, 'song1.mp3')
-    if not os.path.exists(filepath): return "Файл не найден", 404
-    return send_file(filepath, mimetype='audio/mpeg')
+@app.errorhandler(404)
+def not_found(e): return "Страница не найдена. <a href='/'>На главную</a>", 404
 
-@app.route('/song2.mp3')
-def serve_song2():
-    filepath = os.path.join(BASE_DIR, 'song2.mp3')
-    if not os.path.exists(filepath): return "Файл не найден", 404
-    return send_file(filepath, mimetype='audio/mpeg')
-
-@app.route('/song3.mp3')
-def serve_song3():
-    filepath = os.path.join(BASE_DIR, 'song3.mp3')
-    if not os.path.exists(filepath): return "Файл не найден", 404
-    return send_file(filepath, mimetype='audio/mpeg')
+@app.errorhandler(500)
+def server_error(e): return "Ошибка 500. <a href='/'>На главную</a>", 500
